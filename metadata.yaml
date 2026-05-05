@@ -1,5 +1,5 @@
 name: astrbot_plugin_ledger
-display_name: 模拟记账
+display_name: AI的模拟记账本
 desc: 全局模拟记账插件，收入和支出仅能通过手动命令或 AI Tool 修改。
 short_desc: 手动维护收入和支出的简单账本。
 version: v1.0.0
