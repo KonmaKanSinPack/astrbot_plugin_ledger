@@ -415,7 +415,13 @@ class LedgerPlugin(Star):
 
     @filter.llm_tool("ledger_show_summary")
     async def ledger_show_summary_tool(self, event: AstrMessageEvent):
-        """供 LLM 读取全局账本汇总，不修改任何持久化数据。"""
+        """读取当前全局账本汇总，不修改任何持久化数据。
+
+        使用建议（给 LLM 的决策规则）：
+        - 需要先确认当前总收入、总支出、结余或最近记录时调用。
+        - 在执行加收入、加支出、覆盖累计值之前，可先调用一次确认当前账本状态。
+        - 该工具是只读工具，不会写入 KV，也不会改变任何账本数据。
+        """
         result = await self._show_summary(event)
         return result
 
@@ -426,7 +432,23 @@ class LedgerPlugin(Star):
         amount: str,
         note: str = "",
     ):
-        """供 LLM 传入金额和备注，追加一笔全局收入记录。"""
+        """向全局账本追加一笔收入记录，并立即持久化。
+
+        使用建议（给 LLM 的决策规则）：
+        - 只在用户明确要求“增加收入”“记一笔收入”“入账”时调用。
+        - 这是追加操作，不会覆盖已有累计收入；如需直接改写累计值，应改用 `ledger_set_income_total`。
+        - 手动命令受白名单限制，但该工具允许 LLM 代用户执行记账。
+        - `amount` 应传可解析为数字的字符串，例如 `100`、`88.50`。
+        - `note` 建议填写简短来源说明，例如“工资”“退款”“红包”。
+
+        推荐格式示例：
+        - `{"amount": "1000", "note": "工资"}`
+        - `{"amount": "88.50", "note": "报销到账"}`
+
+        Args:
+            amount (str): 本次新增的收入金额，必须是大于 0 的数字字符串。
+            note (str, optional): 这笔收入的备注，会写入最近记录中。
+        """
         try:
             message = await self._change_total(
                 event,
@@ -451,7 +473,23 @@ class LedgerPlugin(Star):
         amount: str,
         note: str = "",
     ):
-        """供 LLM 传入金额和备注，追加一笔全局支出记录。"""
+        """向全局账本追加一笔支出记录，并立即持久化。
+
+        使用建议（给 LLM 的决策规则）：
+        - 只在用户明确要求“增加支出”“记一笔花销”“出账”时调用。
+        - 这是追加操作，不会覆盖已有累计支出；如需直接改写累计值，应改用 `ledger_set_expense_total`。
+        - 手动命令受白名单限制，但该工具允许 LLM 代用户执行记账。
+        - `amount` 应传可解析为数字的字符串，例如 `35`、`128.80`。
+        - `note` 建议填写简短用途说明，例如“午饭”“打车”“买书”。
+
+        推荐格式示例：
+        - `{"amount": "35.5", "note": "午饭"}`
+        - `{"amount": "128.80", "note": "打车"}`
+
+        Args:
+            amount (str): 本次新增的支出金额，必须是大于 0 的数字字符串。
+            note (str, optional): 这笔支出的备注，会写入最近记录中。
+        """
         try:
             message = await self._change_total(
                 event,
@@ -475,7 +513,20 @@ class LedgerPlugin(Star):
         event: AstrMessageEvent,
         amount: str,
     ):
-        """供 LLM 传入金额，直接覆盖全局累计收入。"""
+        """直接覆盖全局账本的累计收入，并立即持久化。
+
+        使用建议（给 LLM 的决策规则）：
+        - 只在用户明确要求“把累计收入改成某个值”“重置收入总额”“覆盖收入统计”时调用。
+        - 这是覆盖操作，不是追加操作；如果用户只是想新增一笔收入，应改用 `ledger_add_income`。
+        - `amount` 应传可解析为数字的字符串，允许传 `0` 用于把累计收入清零。
+
+        推荐格式示例：
+        - `{"amount": "5000"}`
+        - `{"amount": "0"}`
+
+        Args:
+            amount (str): 覆盖后的累计收入金额，必须是不小于 0 的数字字符串。
+        """
         try:
             message = await self._change_total(
                 event,
@@ -498,7 +549,20 @@ class LedgerPlugin(Star):
         event: AstrMessageEvent,
         amount: str,
     ):
-        """供 LLM 传入金额，直接覆盖全局累计支出。"""
+        """直接覆盖全局账本的累计支出，并立即持久化。
+
+        使用建议（给 LLM 的决策规则）：
+        - 只在用户明确要求“把累计支出改成某个值”“重置支出总额”“覆盖支出统计”时调用。
+        - 这是覆盖操作，不是追加操作；如果用户只是想新增一笔支出，应改用 `ledger_add_expense`。
+        - `amount` 应传可解析为数字的字符串，允许传 `0` 用于把累计支出清零。
+
+        推荐格式示例：
+        - `{"amount": "1200"}`
+        - `{"amount": "0"}`
+
+        Args:
+            amount (str): 覆盖后的累计支出金额，必须是不小于 0 的数字字符串。
+        """
         try:
             message = await self._change_total(
                 event,
