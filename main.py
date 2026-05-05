@@ -21,10 +21,13 @@ MONEY_PRECISION = Decimal("0.01")
 )
 class LedgerPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
+        """初始化插件并缓存配置，供权限和记账逻辑复用。"""
         super().__init__(context)
         self.config = config if config is not None else {}
 
     def _allowed_ids(self) -> set[str]:
+        """读取白名单配置并返回去重后的 sender_id 集合。"""
+        # 配置可能来自 WebUI 或旧配置文件，先统一清洗成可比较的字符串集合。
         if not isinstance(self.config, dict):
             return set()
 
@@ -40,6 +43,7 @@ class LedgerPlugin(Star):
         return allowed_ids
 
     def _command_modify_denied_message(self, event: AstrMessageEvent) -> str | None:
+        """检查手动修改权限，若拒绝则返回给用户的提示文本。"""
         sender_id = str(event.get_sender_id() or "").strip()
         allowed_ids = self._allowed_ids()
         if sender_id and sender_id in allowed_ids:
@@ -58,10 +62,12 @@ class LedgerPlugin(Star):
         )
 
     def _ledger_key(self, event: AstrMessageEvent) -> str:
+        """返回全局账本的 KV 键，不区分事件来源。"""
         del event
         return f"{LEDGER_PREFIX}:global"
 
     def _default_ledger(self) -> dict[str, Any]:
+        """构造空账本数据，用于首次初始化或异常兜底。"""
         return {
             "income": self._format_amount(Decimal("0")),
             "expense": self._format_amount(Decimal("0")),
@@ -69,9 +75,11 @@ class LedgerPlugin(Star):
         }
 
     def _format_amount(self, amount: Decimal) -> str:
+        """把金额统一格式化为两位小数字符串。"""
         return f"{amount.quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP):f}"
 
     def _parse_amount(self, raw_amount: Any, *, allow_zero: bool) -> Decimal:
+        """解析输入金额并按记账规则校验，返回 Decimal。"""
         try:
             amount = Decimal(str(raw_amount)).quantize(
                 MONEY_PRECISION,
@@ -87,12 +95,14 @@ class LedgerPlugin(Star):
         return amount
 
     def _safe_amount(self, raw_amount: Any) -> str:
+        """容错读取金额字段，异常时回退为 0.00。"""
         try:
             return self._format_amount(self._parse_amount(raw_amount, allow_zero=True))
         except ValueError:
             return self._format_amount(Decimal("0"))
 
     async def _load_ledger(self, event: AstrMessageEvent) -> dict[str, Any]:
+        """从 KV 读取全局账本，并清洗旧数据或坏数据。"""
         ledger = await self.get_kv_data(self._ledger_key(event), None)
         if not isinstance(ledger, dict):
             return self._default_ledger()
@@ -100,6 +110,7 @@ class LedgerPlugin(Star):
         records = ledger.get("records", [])
         normalized_records: list[dict[str, str]] = []
         if isinstance(records, list):
+            # 读取持久化数据时做一次清洗，避免旧字段或坏值让整个账本不可读。
             for record in records[-MAX_RECORDS:]:
                 if not isinstance(record, dict):
                     continue
@@ -129,6 +140,7 @@ class LedgerPlugin(Star):
         }
 
     async def _save_ledger(self, event: AstrMessageEvent, ledger: dict[str, Any]) -> None:
+        """把当前账本状态写回 KV 持久化存储。"""
         await self.put_kv_data(self._ledger_key(event), ledger)
 
     def _extract_note(
@@ -137,6 +149,7 @@ class LedgerPlugin(Star):
         command_name: str,
         fallback: str = "",
     ) -> str:
+        """从命令消息里提取备注，兼容带空格文本被参数解析截断。"""
         if fallback.strip():
             return fallback.strip()
 
@@ -144,6 +157,7 @@ class LedgerPlugin(Star):
         if not message:
             return ""
 
+        # 命令参数解析对多词备注不稳定时，回退到原始消息里重建备注文本。
         tokens = message.split()
         if tokens and tokens[0].lstrip("/") == "ledger":
             tokens = tokens[1:]
@@ -164,10 +178,12 @@ class LedgerPlugin(Star):
         note: str,
         operator: str | None = None,
     ) -> None:
+        """向账本追加一条操作记录，并裁剪历史长度。"""
         records = ledger.setdefault("records", [])
         if not isinstance(records, list):
             records = []
 
+        # 在全局账本里保留操作人，方便区分手动修改和 LLM 代执行。
         records.append(
             {
                 "type": record_type,
@@ -178,9 +194,11 @@ class LedgerPlugin(Star):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
+        # 只保留最近 N 条操作，避免 KV 数据无限增长。
         ledger["records"] = records[-MAX_RECORDS:]
 
     def _summary_text(self, event: AstrMessageEvent, ledger: dict[str, Any]) -> str:
+        """把当前账本状态渲染为用户可读的汇总文本。"""
         income = Decimal(ledger["income"])
         expense = Decimal(ledger["expense"])
         balance = income - expense
@@ -222,6 +240,8 @@ class LedgerPlugin(Star):
         allow_llm: bool = False,
         operator: str | None = None,
     ) -> str:
+        """按收入或支出修改总额，并把结果持久化到账本。"""
+        # 把“手动命令受白名单限制”和“LLM tool 可代执行”拆成两条路径，避免权限散落在各个入口里。
         if not allow_llm:
             denied_message = self._command_modify_denied_message(event)
             if denied_message:
@@ -229,6 +249,7 @@ class LedgerPlugin(Star):
 
         allow_zero = action == "set"
         amount = self._parse_amount(raw_amount, allow_zero=allow_zero)
+        # 所有修改入口都收敛到这里，保证命令和 tool 的记账行为一致。
         ledger = await self._load_ledger(event)
         field = "income" if record_type == "income" else "expense"
         current_total = Decimal(ledger[field])
@@ -263,16 +284,17 @@ class LedgerPlugin(Star):
         return f"{headline}\n\n{self._summary_text(event, ledger)}"
 
     async def _show_summary(self, event: AstrMessageEvent) -> str:
+        """读取全局账本并返回最新汇总文本。"""
         ledger = await self._load_ledger(event)
         return self._summary_text(event, ledger)
 
     @filter.command_group("ledger")
     def ledger(self):
-        """模拟记账命令组。"""
+        """注册 /ledger 命令组，承载查看和修改账本的入口。"""
 
     @ledger.command("help")
     async def ledger_help(self, event: AstrMessageEvent):
-        """显示模拟记账插件帮助。"""
+        """处理 /ledger help，输出指令列表和权限说明。"""
         help_text = "\n".join(
             [
                 "模拟记账插件指令：",
@@ -291,7 +313,7 @@ class LedgerPlugin(Star):
 
     @ledger.command("show")
     async def ledger_show(self, event: AstrMessageEvent):
-        """查看全局账本汇总。"""
+        """处理 /ledger show，读取并返回当前全局账本汇总。"""
         yield event.plain_result(await self._show_summary(event))
 
     @ledger.command("income")
@@ -301,7 +323,7 @@ class LedgerPlugin(Star):
         amount: str,
         note: str = "",
     ):
-        """手动增加收入。"""
+        """处理 /ledger income，读取金额和备注后追加一笔全局收入。"""
         try:
             message = await self._change_total(
                 event,
@@ -324,7 +346,7 @@ class LedgerPlugin(Star):
         amount: str,
         note: str = "",
     ):
-        """手动增加支出。"""
+        """处理 /ledger expense，读取金额和备注后追加一笔全局支出。"""
         try:
             message = await self._change_total(
                 event,
@@ -342,7 +364,7 @@ class LedgerPlugin(Star):
 
     @ledger.command("set_income")
     async def ledger_set_income(self, event: AstrMessageEvent, amount: str):
-        """手动改写累计收入。"""
+        """处理 /ledger set_income，按输入金额直接覆盖累计收入。"""
         try:
             message = await self._change_total(
                 event,
@@ -359,7 +381,7 @@ class LedgerPlugin(Star):
 
     @ledger.command("set_expense")
     async def ledger_set_expense(self, event: AstrMessageEvent, amount: str):
-        """手动改写累计支出。"""
+        """处理 /ledger set_expense，按输入金额直接覆盖累计支出。"""
         try:
             message = await self._change_total(
                 event,
@@ -376,7 +398,8 @@ class LedgerPlugin(Star):
 
     @ledger.command("reset")
     async def ledger_reset(self, event: AstrMessageEvent):
-        """清空全局账本。"""
+        """处理 /ledger reset，校验权限后清空整个全局账本。"""
+        # reset 不走统一改额入口，所以要在命令层复用同一套手动权限判断。
         denied_message = self._command_modify_denied_message(event)
         if denied_message:
             yield event.plain_result(denied_message)
@@ -392,8 +415,9 @@ class LedgerPlugin(Star):
 
     @filter.llm_tool("ledger_show_summary")
     async def ledger_show_summary_tool(self, event: AstrMessageEvent):
-        """Read the shared global ledger summary before or after a bookkeeping change."""
-        yield event.plain_result(await self._show_summary(event))
+        """供 LLM 读取全局账本汇总，不修改任何持久化数据。"""
+        result = await self._show_summary(event)
+        return result
 
     @filter.llm_tool("ledger_add_income")
     async def ledger_add_income_tool(
@@ -402,10 +426,7 @@ class LedgerPlugin(Star):
         amount: str,
         note: str = "",
     ):
-        """Record manual income for the shared global ledger.
-
-        Use this tool only when the user explicitly asks to add income.
-        """
+        """供 LLM 传入金额和备注，追加一笔全局收入记录。"""
         try:
             message = await self._change_total(
                 event,
@@ -421,7 +442,7 @@ class LedgerPlugin(Star):
         except Exception as exc:
             logger.error(f"AI 调用收入工具失败: {exc}")
             message = "记录收入失败，请检查日志。"
-        yield event.plain_result(message)
+        return message
 
     @filter.llm_tool("ledger_add_expense")
     async def ledger_add_expense_tool(
@@ -430,10 +451,7 @@ class LedgerPlugin(Star):
         amount: str,
         note: str = "",
     ):
-        """Record manual expense for the shared global ledger.
-
-        Use this tool only when the user explicitly asks to add expense.
-        """
+        """供 LLM 传入金额和备注，追加一笔全局支出记录。"""
         try:
             message = await self._change_total(
                 event,
@@ -449,7 +467,7 @@ class LedgerPlugin(Star):
         except Exception as exc:
             logger.error(f"AI 调用支出工具失败: {exc}")
             message = "记录支出失败，请检查日志。"
-        yield event.plain_result(message)
+        return message
 
     @filter.llm_tool("ledger_set_income_total")
     async def ledger_set_income_total_tool(
@@ -457,10 +475,7 @@ class LedgerPlugin(Star):
         event: AstrMessageEvent,
         amount: str,
     ):
-        """Set the shared global ledger total income to a specific value.
-
-        Use this tool only when the user explicitly wants to overwrite total income.
-        """
+        """供 LLM 传入金额，直接覆盖全局累计收入。"""
         try:
             message = await self._change_total(
                 event,
@@ -475,7 +490,7 @@ class LedgerPlugin(Star):
         except Exception as exc:
             logger.error(f"AI 设置累计收入失败: {exc}")
             message = "设置累计收入失败，请检查日志。"
-        yield event.plain_result(message)
+        return message
 
     @filter.llm_tool("ledger_set_expense_total")
     async def ledger_set_expense_total_tool(
@@ -483,10 +498,7 @@ class LedgerPlugin(Star):
         event: AstrMessageEvent,
         amount: str,
     ):
-        """Set the shared global ledger total expense to a specific value.
-
-        Use this tool only when the user explicitly wants to overwrite total expense.
-        """
+        """供 LLM 传入金额，直接覆盖全局累计支出。"""
         try:
             message = await self._change_total(
                 event,
@@ -501,4 +513,4 @@ class LedgerPlugin(Star):
         except Exception as exc:
             logger.error(f"AI 设置累计支出失败: {exc}")
             message = "设置累计支出失败，请检查日志。"
-        yield event.plain_result(message)
+        return message
