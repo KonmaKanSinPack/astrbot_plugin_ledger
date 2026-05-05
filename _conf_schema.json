@@ -1,0 +1,8 @@
+{
+	"allowed_ids": {
+		"type": "list",
+		"description": "允许手动修改全局账本的发送者 ID 白名单。",
+		"hint": "填写 AstrBot sender_id 列表。只有这些 ID 可以执行 /ledger income、/ledger expense、/ledger set_income、/ledger set_expense、/ledger reset。LLM Tool 不受此限制。",
+		"default": []
+	}
+}
